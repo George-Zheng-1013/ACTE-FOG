@@ -1,0 +1,25 @@
+seed: 20260916
+data:
+  sensor_csv: data/sensor_data.csv
+  clinical_csv: data/clinical_data.csv
+  fs: 60
+  filter_low: 0.5
+  filter_high: 20.0
+  window_seconds: 2.0
+  overlap: 0.75
+  label_rule: majority
+  sensor_set: [ankleL_gyro]
+split:
+  mode: matched_11_5_6
+  train_n: 11
+  val_n: 5
+  test_n: 6
+model:
+  name: official_cnn
+train:
+  epochs: 120
+  batch_size: 64
+  lr: 0.008
+  weight_decay: 0.0004
+  patience: 12
+  monitor: val_auc

@@ -1,0 +1,6 @@
+Set-Location -LiteralPath 'D:\HP\OneDrive\Desktop\学校\项目\基于步态数据的帕金森疾病诊断与可解释性\背景材料\fogstar_final_engineering'
+
+$out = 'results/my_acte_seed2_20261021'
+if (Test-Path -LiteralPath $out) { throw '输出目录已存在，请更换名称后重跑。' }
+
+& 'D:\Develop\miniconda\python.exe' -m src.final_model --features results/context_probe_full/context_features.npz --out $out --seed 2

@@ -1,0 +1,17 @@
+FINAL STATUS: CORE STUDY COMPLETE
+
+Frozen core model: ACTE-FoG
+- bilateral ankle local features
+- compact whole-body coordination features
+- missingness-aware representation
+- ExtraTrees window classifier
+- 7-window temporal probability decoder
+
+Key results:
+- Fixed 11/5/6, 5 seeds: Test AUROC 0.931845 ± 0.000251
+- Full LOSO internal confirmation: pooled AUROC ~0.9080, AUPRC ~0.6878, subject-macro AUROC ~0.8879
+- 30-tree LOSO engineering recheck: AUROC 0.9046, AUPRC 0.6886
+- Hard-negative option: small overall/turning gain, no Standing improvement; not a core module
+
+Interpretation:
+0.9318 is exploratory/protocol-comparable. LOSO ~0.908 is the preferred current estimate of cross-subject generalization. External validation remains future work, not a prerequisite for closing this engineering phase.
