@@ -74,6 +74,29 @@ def fast_auc(y: np.ndarray, p: np.ndarray) -> float | None:
     return float((ranks[y == 1].sum() - npos * (npos + 1) / 2.0) / (npos * nneg))
 
 
+def boot_p(d: np.ndarray) -> float:
+    """Two-sided bootstrap p-value: 2 x the smaller tail mass at zero."""
+    d = d[np.isfinite(d)]
+    if len(d) == 0:
+        return float("nan")
+    p = 2.0 * min(float((d <= 0).mean()), float((d >= 0).mean()))
+    return float(min(1.0, max(p, 1.0 / len(d))))
+
+
+def holm(pvals: np.ndarray) -> np.ndarray:
+    """Holm step-down adjusted p-values."""
+    p = np.asarray(pvals, float)
+    m = len(p)
+    order = np.argsort(p)
+    adj = np.empty(m)
+    running = 0.0
+    for rank, i in enumerate(order):
+        val = min(1.0, (m - rank) * p[i])
+        running = max(running, val)
+        adj[i] = running
+    return adj
+
+
 def f1_at(y: np.ndarray, p: np.ndarray, thr: float) -> float | None:
     z = p >= thr
     tp = int((z & (y == 1)).sum()); fp = int((z & (y == 0)).sum())
@@ -172,6 +195,7 @@ def main():
                              "delta": b_ - a_,
                              "ci_low": float(np.percentile(d, 2.5)),
                              "ci_high": float(np.percentile(d, 97.5)),
+                             "p_boot": boot_p(d),
                              "n_boot_valid": int(len(d))})
     # model contrast inside each experiment
     for e in exps:
@@ -189,9 +213,16 @@ def main():
                              "delta": a_ - b_,
                              "ci_low": float(np.percentile(d, 2.5)),
                              "ci_high": float(np.percentile(d, 97.5)),
+                             "p_boot": boot_p(d),
                              "n_boot_valid": int(len(d))})
 
     out = pd.DataFrame(rows)
+    # multiplicity: 36 AUROC contrasts were tested, so raw p-values overstate
+    # evidence. Holm is applied both within each question (group) and across all.
+    out["group"] = out.family.where(~out.family.isin(["M", "model"]), "model")
+    out["p_holm_all"] = holm(out.p_boot.values)
+    out["p_holm_group"] = out.groupby("group").p_boot.transform(
+        lambda col: pd.Series(holm(col.values), index=col.index))
     out.to_csv(root / "bootstrap.csv", index=False)
     (root / "bootstrap_protocol.json").write_text(json.dumps({
         "n_boot": a.n_boot, "boot_seed": a.boot_seed,
@@ -204,7 +235,14 @@ def main():
         "auprc_note": "AUPRC interval omitted: sklearn AP is too slow for 2000x5x~20 calls; reported as mean/sd across seeds instead",
     }, indent=2), encoding="utf-8")
     pd.set_option("display.width", 200)
-    print(out[out.metric == "auroc"].to_string(index=False, float_format=lambda x: f"{x:+.4f}"))
+    au = out[out.metric == "auroc"].sort_values("p_boot")
+    print(au[["group", "model", "contrast", "delta", "ci_low", "ci_high",
+              "p_boot", "p_holm_group", "p_holm_all"]].to_string(
+        index=False, float_format=lambda x: f"{x:+.4f}"))
+    print(f"\nAUROC contrasts: {len(au)}；"
+          f"未校正 p<0.05: {(au.p_boot < 0.05).sum()}；"
+          f"组内 Holm<0.05: {(au.p_holm_group < 0.05).sum()}；"
+          f"全体 Holm<0.05: {(au.p_holm_all < 0.05).sum()}")
 
 
 if __name__ == "__main__":
