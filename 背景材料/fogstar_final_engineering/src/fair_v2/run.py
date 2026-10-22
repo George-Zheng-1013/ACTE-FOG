@@ -116,7 +116,8 @@ def representation_matrices(ds, rep: str, sensor: str):
 
 # --------------------------------------------------------------------------- #
 def run_experiment(name: str, seed: int, csv: str, out_root: Path, device: str,
-                   cache_dir: Path, reuse_dir: Path | None = None) -> dict:
+                   cache_dir: Path, reuse_dir: Path | None = None,
+                   cnn_cfg: dict | None = None, et_cfg: dict | None = None) -> dict:
     spec = EXPERIMENTS[name]
     print(f"[{name}] family={spec['family']} sensor={spec['sensor']} seed={seed}", flush=True)
     t_start = time.time()
@@ -149,7 +150,10 @@ def run_experiment(name: str, seed: int, csv: str, out_root: Path, device: str,
         "processing": p_cfg,
         "processing_config_hash": ds["processing_hash"],
         "cohort_hash": schema.short_hash({"windows": win.window_id.tolist()}),
-        "cnn_cfg": models.CNN_CFG, "et_cfg": models.ET_CFG,
+        "cnn_cfg": {**models.CNN_CFG, **(cnn_cfg or {})},
+        "et_cfg": {**models.ET_CFG, **(et_cfg or {})},
+        "recipe_source": ("src.fair_v2.tune (equal-budget validation search)"
+                          if (cnn_cfg or et_cfg) else "fixed defaults (CNN_CFG / ET_CFG)"),
         "threshold_rule": "0..1 step 0.001, minimise |sens-spec|, ties -> smallest",
         "metric_rule": "AUROC/AUPRC on probabilities, rest at the val threshold",
         "seed_plan": {"batch1": [1], "batch2": [1, 2, 3, 4, 5]},
@@ -199,7 +203,8 @@ def run_experiment(name: str, seed: int, csv: str, out_root: Path, device: str,
                     raise ValueError("CNN receives only the time-series view in this protocol")
                 Xc = views.cnn_view(T, ch_idx) if mname == "cnn" else X
                 fn = models.train_cnn if mname == "cnn" else models.train_et
-                r = fn(Xc, y, w_full, tr, va, te, seed=seed, device=device)
+                cfg_used = cnn_cfg if mname == "cnn" else et_cfg
+                r = fn(Xc, y, w_full, tr, va, te, seed=seed, device=device, cfg=cfg_used)
                 train_seconds = r["train_seconds"]
 
                 p_raw = np.zeros(len(y))
@@ -217,7 +222,8 @@ def run_experiment(name: str, seed: int, csv: str, out_root: Path, device: str,
                     pd.DataFrame(r["history"]).to_csv(exp_dir / f"history_{rep}.csv", index=False)
                     (mdir / "fit_info.json").write_text(json.dumps(
                         {"n_params": r["n_params"], "best_epoch": r["best_epoch"],
-                         "epochs_run": r["epochs_run"], "best_val_loss": r["best_val_loss"],
+                         "best_score": r["best_score"], "monitor": r["cfg"]["monitor"],
+                         "epochs_run": r["epochs_run"],
                          "device": r["device"], "in_ch": r["in_ch"], "cfg": r["cfg"]},
                         indent=2), encoding="utf-8")
                 else:
@@ -232,6 +238,14 @@ def run_experiment(name: str, seed: int, csv: str, out_root: Path, device: str,
             for split, mask in (("val", va), ("test", te)):
                 df = evaluate.prediction_frame(win, mask, p_raw[mask], p_eval[mask], thr, meta)
                 df.to_csv(mdir / f"{split}_predictions.csv", index=False)
+                # exact float64 copy: CSV text round-trip is not bit-exact, and the
+                # smoothed probabilities contain ties that AUROC is sensitive to
+                np.savez(mdir / f"{split}_predictions.npz",
+                         window_id=win.window_id[mask].to_numpy().astype(str),
+                         y_true=win.y[mask].to_numpy(np.int64),
+                         p_raw=p_raw[mask].astype(np.float64),
+                         p_eval=p_eval[mask].astype(np.float64),
+                         threshold=np.float64(thr))
             (mdir / "metrics.json").write_text(json.dumps(
                 {"experiment": name, "model": mname, "representation": rep, "seed": seed,
                  "threshold": thr, "smoothing": p_cfg["smoothing"]["enabled"], **met},
@@ -288,9 +302,20 @@ def main():
     ap.add_argument("--csv", default=str(ENGINE_ROOT / "data" / "sensor_data.csv"))
     ap.add_argument("--out", default=str(ENGINE_ROOT / "results" / "fair_ctrl_v2"))
     ap.add_argument("--device", default="cuda", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--cfg-json", default=None,
+                    help="frozen recipe from src.fair_v2.tune (keys: cnn / et)")
     a = ap.parse_args()
     out_root = Path(a.out)
-    run_experiment(a.exp, a.seed, a.csv, out_root, a.device, cache_dir=out_root / "_cache")
+    cnn_cfg = et_cfg = None
+    if a.cfg_json:
+        sel = json.loads(Path(a.cfg_json).read_text(encoding="utf-8"))
+        cnn_keys = ("lr", "batch_size", "weight_decay", "max_epochs", "patience",
+                    "monitor", "min_delta", "l2_penalty", "dropout")
+        et_keys = ("n_estimators", "min_samples_leaf", "max_features", "class_weight")
+        cnn_cfg = {k: v for k, v in sel.get("cnn", {}).items() if k in cnn_keys} or None
+        et_cfg = {k: v for k, v in sel.get("et", {}).items() if k in et_keys} or None
+    run_experiment(a.exp, a.seed, a.csv, out_root, a.device, cache_dir=out_root / "_cache",
+                   cnn_cfg=cnn_cfg, et_cfg=et_cfg)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 import torch
+from sklearn.metrics import average_precision_score, roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -22,14 +23,25 @@ CNN_CFG = {
     "weight_decay": 4e-4,
     "optimizer": "AdamW",
     "batch_size": 64,
-    "max_epochs": 120,
-    "patience": 10,
-    "min_delta": 1e-3,
+    "max_epochs": 60,
+    "patience": 20,
+    "monitor": "val_auc",
+    "min_delta": 1e-4,
     "l2_penalty": 1e-3,
     "l2_applies_to": "all Conv1d/Linear except fc2",
     "loss": "weighted BCEWithLogits (per-window w_c) + L2",
-    "early_stop_metric": "val loss (weighted BCE + L2) on patients 12-16",
+    "early_stop_metric": "validation AUROC on patients 12-16 (primary metric), tie on AUPRC",
     "dropout": 0.4,
+}
+
+# Recipe v1, kept for reproducing results/fair_ctrl_v2 (fixed-parameter table).
+CNN_CFG_V1 = {
+    **CNN_CFG,
+    "max_epochs": 120,
+    "patience": 10,
+    "monitor": "val_loss",
+    "min_delta": 1e-3,
+    "early_stop_metric": "val loss (weighted BCE + L2) on patients 12-16",
 }
 
 ET_CFG = {
@@ -103,6 +115,7 @@ def train_cnn(X, y, w, tr, va, te, seed=1, device="auto", cfg=None) -> dict:
     ld = DataLoader(TensorDataset(xtr, ytr, wtr), batch_size=cfg["batch_size"], shuffle=True)
 
     best, best_ep, bad = None, 0, 0
+    best_state = None
     hist = []
     for ep in range(1, cfg["max_epochs"] + 1):
         model.train()
@@ -120,22 +133,32 @@ def train_cnn(X, y, w, tr, va, te, seed=1, device="auto", cfg=None) -> dict:
             logit, _ = model(xva.to(dev))
             vl = float(_wloss(logit, yva.to(dev), wva.to(dev), bce).item()
                        + cfg["l2_penalty"] * _l2(model).item())
-        hist.append({"epoch": ep, "train_loss": float(np.mean(ls)), "val_loss": vl})
-        if vl < (best or 1e18) - cfg["min_delta"]:
-            best, best_ep, bad = vl, ep, 0
+            pv = torch.sigmoid(logit).cpu().numpy().astype(np.float64)
+        yv = yva.numpy().astype(int)
+        auc = float(roc_auc_score(yv, pv)) if len(np.unique(yv)) > 1 else float("nan")
+        ap = float(average_precision_score(yv, pv)) if len(np.unique(yv)) > 1 else float("nan")
+        hist.append({"epoch": ep, "train_loss": float(np.mean(ls)), "val_loss": vl,
+                     "val_auroc": auc, "val_auprc": ap})
+        # higher score is better for both monitors
+        score = auc if cfg["monitor"] == "val_auc" else -vl
+        if best is None or score > best + cfg["min_delta"]:
+            best, best_ep, bad = score, ep, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else:
             bad += 1
         if bad >= cfg["patience"]:
             break
 
+    if best_state is None:                      # degenerate: keep the last epoch
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_ep = len(hist)
     model.load_state_dict(best_state)
     p_va = _predict(model, np.ascontiguousarray(X[va], np.float32), dev)
     p_te = _predict(model, np.ascontiguousarray(X[te], np.float32), dev)
     return {
         "model": model, "state_dict": best_state, "n_params": n_params,
         "p_val": p_va, "p_test": p_te, "history": hist,
-        "best_epoch": best_ep, "best_val_loss": best, "epochs_run": len(hist),
+        "best_epoch": best_ep, "best_score": best, "epochs_run": len(hist),
         "train_seconds": round(time.time() - t0, 2), "device": str(dev),
         "in_ch": int(X.shape[2]), "cfg": cfg,
     }

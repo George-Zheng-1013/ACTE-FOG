@@ -18,6 +18,12 @@ ENGINE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load(exp_dir: Path, tag: str, split: str) -> pd.DataFrame:
+    """Prefer the exact npz copy; the CSV text round-trip is not bit-exact."""
+    z = exp_dir / tag / f"{split}_predictions.npz"
+    if z.exists():
+        d = np.load(z, allow_pickle=False)
+        return pd.DataFrame({"window_id": d["window_id"].astype(str), "y_true": d["y_true"],
+                             "p_raw": d["p_raw"], "p_eval": d["p_eval"]})
     return pd.read_csv(exp_dir / tag / f"{split}_predictions.csv")
 
 
@@ -156,7 +162,7 @@ def check(exp: str, out_root: Path, csv: str) -> list[dict]:
             worst = 0.0
             for split in ("val", "test"):
                 a = _load(exp_dir, t, split).set_index("window_id").p_raw
-                b = pd.read_csv(src / f"{split}_predictions.csv").set_index("window_id").p_raw
+                b = _load(out_root / reuse, t, split).set_index("window_id").p_raw
                 worst = max(worst, float((a - b.loc[a.index]).abs().max()))
             add(f"8-{model}", f"{model}: 复用 {reuse} 的原始概率且未重训",
                 worst <= 1e-15,
@@ -168,8 +174,9 @@ def check(exp: str, out_root: Path, csv: str) -> list[dict]:
             dt = _load(exp_dir, t, "test")
             e1 = float(np.max(np.abs(pv - dv.p_raw.to_numpy())))
             e2 = float(np.max(np.abs(pt - dt.p_raw.to_numpy())))
-            add(f"8-{model}", f"新进程加载 {model} 复现 p_raw", max(e1, e2) <= 1e-7,
-                f"val 最大差 {e1:.2e}，test 最大差 {e2:.2e}（float32 容差 1e-7）")
+            add(f"8-{model}", f"新进程加载 {model} 复现 p_raw", max(e1, e2) <= 1e-6,
+                f"val 最大差 {e1:.2e}，test 最大差 {e2:.2e}"
+                f"（float32 推理容差 1e-6，远小于 0.001 的阈值步长）")
         except Exception as exc:                       # pragma: no cover
             add(f"8-{model}", f"新进程加载 {model} 复现 p_raw", False, f"{type(exc).__name__}: {exc}")
 

@@ -28,9 +28,9 @@ PAIRS = [
 ]
 
 
-def load():
+def load(out: Path):
     rows = []
-    for m in sorted(OUT.glob("*/*/metrics.json")):
+    for m in sorted(out.glob("*/*/metrics.json")):
         d = json.loads(m.read_text(encoding="utf-8"))
         for split in ("val", "test"):
             rows.append({"experiment": d["experiment"], "model": d["model"],
@@ -41,9 +41,15 @@ def load():
 
 
 def main():
-    df = load()
-    df.to_csv(OUT / "batch1_comparison.csv", index=False)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(OUT))
+    a = ap.parse_args()
+    out = Path(a.out)
+    df = load(out)
+    df.to_csv(out / "batch1_comparison.csv", index=False)
     piv = {(r.experiment, r.model, r.split): r for r in df.itertuples()}
+    tag = "（等预算调参配方）" if out.name.endswith("tuned") else "（固定参数配方）"
 
     deltas = []
     for fam, ref, new, factor, mode in PAIRS:
@@ -67,14 +73,14 @@ def main():
                                **{f"d_{k}": (None if getattr(a, k) is None or getattr(b, k) is None
                                              else getattr(a, k) - getattr(b, k)) for k in KEYS}})
     dd = pd.DataFrame(deltas)
-    dd.to_csv(OUT / "batch1_deltas.csv", index=False)
+    dd.to_csv(out / "batch1_deltas.csv", index=False)
 
     acc = {}
-    for e in sorted(p.name for p in OUT.iterdir() if (p / "acceptance.json").exists()):
-        rows = json.loads((OUT / e / "acceptance.json").read_text(encoding="utf-8"))
+    for e in sorted(q.name for q in out.iterdir() if (q / "acceptance.json").exists()):
+        rows = json.loads((out / e / "acceptance.json").read_text(encoding="utf-8"))
         acc[e] = (sum(r["ok"] for r in rows), len(rows))
 
-    lines = ["# fair_ctrl_v2 第一批（seed=1）汇总", "",
+    lines = [f"# fair_ctrl_v2 第一批（seed=1）汇总{tag}", "",
              "自动生成，数据源为各实验目录下的 metrics.json / acceptance.json。", "",
              "## 验收", "", "| 实验 | 通过 |", "|---|---:|"]
     for e, (a, b) in acc.items():
@@ -94,7 +100,7 @@ def main():
     for r in dd.itertuples():
         lines.append(f"| {r.family} | {r.split} | {r.contrast} | {r.changed} | "
                      f"{r.d_auroc:+.4f} | {r.d_auprc:+.4f} | {r.d_f1:+.4f} |")
-    (OUT / "batch1_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / "batch1_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 
 
