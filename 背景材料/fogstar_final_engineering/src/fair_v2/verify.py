@@ -37,6 +37,7 @@ def _reload_predict(model_dir: Path, model: str, protocol: dict, csv: str,
     va = (win.split == "val").to_numpy()
     te = (win.split == "test").to_numpy()
     kind = json.loads((model_dir / "view.json").read_text(encoding="utf-8")).get("kind", "flattened signal")
+    with_mask = bool(protocol.get("missing_indicator_view", False))
     import torch
     # reload on the same device class that produced the run, so a difference can
     # only come from the saved artefacts, not from CPU/GPU kernel rounding
@@ -46,7 +47,7 @@ def _reload_predict(model_dir: Path, model: str, protocol: dict, csv: str,
         m = OfficialCNN(len(ch_idx))
         m.load_state_dict(torch.load(model_dir / "model.pt", map_location="cpu"))
         m.to(dev).eval()
-        X = views.cnn_view(ds["T"], ch_idx)
+        X = views.cnn_view(ds["T"], ds["M"], ch_idx, with_mask)
         with torch.no_grad():
             # same inference batch size as the run itself (512): cuDNN may pick a
             # different algorithm for a different batch shape, at 1-ULP level
@@ -63,13 +64,13 @@ def _reload_predict(model_dir: Path, model: str, protocol: dict, csv: str,
             F = feat.build_features(ds["T"], ds["M"])
             X = F[:, feat.indices_without("coord")]
         else:
-            X = views.et_view(ds["T"], ch_idx)
+            X = views.et_view(ds["T"], ds["M"], ch_idx, with_mask)
         p = m.predict_proba(X)[:, 1].astype(np.float64)
     return p[va], p[te], win
 
 
-def check(exp: str, out_root: Path, csv: str) -> list[dict]:
-    exp_dir = out_root / exp
+def check(exp: str, out_root: Path, csv: str, seed: int | None = None) -> list[dict]:
+    exp_dir = (out_root / exp / f"seed{seed}") if seed is not None else (out_root / exp)
     protocol = json.loads((exp_dir / "protocol.json").read_text(encoding="utf-8"))
     run_cfg = json.loads((exp_dir / "run_config.json").read_text(encoding="utf-8"))
     tags = sorted(p.name for p in exp_dir.iterdir()
@@ -219,13 +220,14 @@ def main():
     ap.add_argument("--exp", default="M")
     ap.add_argument("--out", default=str(ENGINE_ROOT / "results" / "fair_ctrl_v2"))
     ap.add_argument("--csv", default=str(ENGINE_ROOT / "data" / "sensor_data.csv"))
+    ap.add_argument("--seed", type=int, default=None)
     a = ap.parse_args()
-    rows = check(a.exp, Path(a.out), a.csv)
+    rows = check(a.exp, Path(a.out), a.csv, a.seed)
     for r in rows:
         print(f"[{'PASS' if r['ok'] else 'FAIL'}] {r['id']:>6} {r['check']}\n         {r['detail']}")
     n_ok = sum(r["ok"] for r in rows)
     print(f"\n{n_ok}/{len(rows)} 项通过")
-    (Path(a.out) / a.exp / "acceptance.json").write_text(
+    (Path(a.out) / a.exp / (f"seed{a.seed}" if a.seed is not None else "") / "acceptance.json").write_text(
         json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
 
 

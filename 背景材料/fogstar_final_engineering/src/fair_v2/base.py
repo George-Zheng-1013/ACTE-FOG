@@ -169,6 +169,43 @@ def _filter_channel(x: np.ndarray, sos, min_run: int, stats: dict) -> np.ndarray
     return out
 
 
+def _train_scaling(Ttr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel mean/std fitted on train patients only, valid values only."""
+    flat = Ttr.reshape(-1, Ttr.shape[-1])
+    mu = np.nanmean(flat, axis=0)
+    sd = np.nanstd(flat, axis=0)
+    mu = np.nan_to_num(mu, nan=0.0)
+    bad = ~np.isfinite(sd) | (sd == 0)
+    sd = np.where(bad, 1.0, sd)
+    return mu.astype(np.float32), sd.astype(np.float32)
+
+
+def _fill_linear(T: np.ndarray, M: np.ndarray) -> tuple[int, int]:
+    """Per-window, per-channel linear interpolation over time.
+
+    Uses only the window's own valid samples; the edges extend the nearest valid
+    value; a channel with no valid sample in the window stays NaN (filled with 0
+    by the caller). Missing positions never become observations: M is untouched.
+    """
+    filled = 0
+    hopeless = 0
+    idx = np.arange(T.shape[1])
+    for i in range(len(T)):
+        m = M[i]
+        for j in range(T.shape[2]):
+            ok = m[:, j]
+            if ok.all():
+                continue
+            t = T[i, :, j]
+            if not ok.any():
+                hopeless += int(len(ok))     # whole window missing: falls back to 0
+                continue
+            t[~ok] = np.interp(idx[~ok], idx[ok], t[ok].astype(np.float64))
+            filled += int((~ok).sum())
+    T[np.isnan(T)] = 0.0
+    return filled, hopeless
+
+
 def process(df: pd.DataFrame, windows: pd.DataFrame, p: dict) -> tuple[np.ndarray, np.ndarray, dict]:
     """Return T (N,120,24) float32, M (N,120,24) bool and processing stats."""
     t0 = time.time()
@@ -194,8 +231,11 @@ def process(df: pd.DataFrame, windows: pd.DataFrame, p: dict) -> tuple[np.ndarra
 
     w = p["window"]
     n = len(windows)
-    T = np.zeros((n, w, len(schema.CHANNELS)), np.float32)
-    M = np.zeros((n, w, len(schema.CHANNELS)), bool)
+    nch = len(schema.CHANNELS)
+    # keep NaN as "missing" until the very last step so that neither demean nor
+    # standardisation can mistake a filled value for an observation
+    T = np.full((n, w, nch), np.nan, np.float32)
+    M = np.zeros((n, w, nch), bool)
 
     for i, r in enumerate(windows.itertuples(index=False)):
         z = vals[r.start_row : r.end_row_exclusive].copy()
@@ -203,13 +243,31 @@ def process(df: pd.DataFrame, windows: pd.DataFrame, p: dict) -> tuple[np.ndarra
         M[i] = m
         if p["demean"]["enabled"]:
             cnt = m.sum(0)
-            mu = np.zeros(z.shape[1])
+            mu = np.zeros(nch)
             ok = cnt > 0
             mu[ok] = np.nanmean(z[:, ok], axis=0)
             stats["channels_all_missing_in_window"] += int((~ok).sum())
             z = z - mu
-        z[~m] = p["fill"]["value"]
         T[i] = z
+
+    if p["standardize"]["enabled"]:
+        tr = (windows.split == "train").to_numpy()
+        mu, sd = _train_scaling(T[tr])
+        T = (T - mu) / sd
+        stats["standardize"] = {
+            "fit_on": "train patients (1-11), valid observations only",
+            "mu_first_channels": [round(float(x), 6) for x in mu[:6]],
+            "sd_first_channels": [round(float(x), 6) for x in sd[:6]],
+            "channels_with_zero_sd": int((sd == 1.0).sum()),
+        }
+
+    fill = p["fill"]
+    if fill["method"] == "linear":
+        filled, hopeless = _fill_linear(T, M)
+        stats["interpolated_cells"] = int(filled)
+        stats["cells_in_all_missing_windows_filled_with_0"] = int(hopeless)
+    else:
+        T[np.isnan(T)] = fill["value"]
 
     stats["elapsed_s"] = round(time.time() - t0, 2)
     stats["T_finite"] = bool(np.isfinite(T).all())
