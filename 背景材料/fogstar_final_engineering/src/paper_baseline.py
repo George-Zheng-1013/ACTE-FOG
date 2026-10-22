@@ -73,7 +73,7 @@ def l2_penalty(model):
     return s
 
 def run(X,Y,S,seed=1,drop_l2=False,internal_eval=True,early_stop=True,max_epochs=120):
-    seed_all(seed); dev=torch.device('cpu')
+    seed_all(seed); dev=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     qtr=np.isin(S,np.arange(1,12)); qv=np.isin(S,np.arange(12,17)); qt=np.isin(S,np.arange(17,23))
     X11,y11=X[qtr],Y[qtr]
     if internal_eval:
