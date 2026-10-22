@@ -223,7 +223,9 @@ def get_dataset(csv: str | Path, p: dict, cache_dir: str | Path) -> dict:
     """Load (or rebuild) the shared tensor for one processing config."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    phash = schema.short_hash(p)
+    # the hash covers the signal chain only: smoothing is a post-process on
+    # probabilities and must not fork the cached tensor
+    phash = schema.short_hash({k: v for k, v in p.items() if k != "smoothing"})
     tpath, mpath = cache_dir / f"T_{phash}.npy", cache_dir / f"M_{phash}.npy"
     wpath, apath = cache_dir / "windows.csv", cache_dir / "data_audit.json"
 
